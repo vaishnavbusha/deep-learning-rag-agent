@@ -12,7 +12,7 @@
 - [x] QA test plan written
 - [x] Demo script written
 - [x] Part 3 interview questions written
-- [ ] Landmark paper PDFs downloaded into `data/corpus/`
+- [x] Landmark paper PDFs downloaded into `data/corpus/`
 - [ ] Public GitHub repository pushed
 - [ ] 5-minute video walkthrough recorded
 - [ ] Final submission link pasted into LMS

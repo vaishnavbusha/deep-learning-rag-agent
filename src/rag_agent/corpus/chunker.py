@@ -13,10 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from langchain_text_splitters import (
-    MarkdownHeaderTextSplitter,
-    RecursiveCharacterTextSplitter,
-)
+from langchain_text_splitters import MarkdownHeaderTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from loguru import logger
 
@@ -49,11 +46,11 @@ class DocumentChunker:
     """
 
     # Default chunking parameters — justify these in your architecture diagram.
-    # chunk_size: 512 tokens balances context richness with retrieval precision.
-    # chunk_overlap: 50 tokens prevents concepts that span chunk boundaries
-    # from being lost entirely. A common interview question.
-    DEFAULT_CHUNK_SIZE = 512
-    DEFAULT_CHUNK_OVERLAP = 50
+    # The assignment rubric asks for chunks that are roughly 100-300 words.
+    # We target up to 220 words with 30 words of overlap so authored sections
+    # remain mostly intact while oversized sections still split cleanly.
+    DEFAULT_CHUNK_SIZE = 220
+    DEFAULT_CHUNK_OVERLAP = 30
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
@@ -85,9 +82,9 @@ class DocumentChunker:
             ChunkMetadata field names. Commonly used to set topic
             and difficulty when the file does not encode these.
         chunk_size : int
-            Maximum characters per chunk.
+            Maximum words per chunk.
         chunk_overlap : int
-            Characters of overlap between adjacent chunks.
+            Word overlap between adjacent chunks.
 
         Returns
         -------
@@ -179,8 +176,8 @@ class DocumentChunker:
         """
         Load and chunk a PDF file.
 
-        Uses PyPDFLoader for text extraction followed by
-        RecursiveCharacterTextSplitter for chunking.
+        Uses PyPDFLoader for text extraction followed by rubric-aligned
+        word-based chunking.
 
         Interview talking point: PDFs from academic papers often contain
         noisy content (headers, footers, reference lists, equations as
@@ -201,18 +198,13 @@ class DocumentChunker:
         """
         loader = PyPDFLoader(str(file_path))
         pages = loader.load()
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
-
         raw_chunks: list[dict] = []
         for page in pages:
             text = page.page_content.strip()
             if len(text) < 50:
                 continue
 
-            for split in splitter.split_text(text):
+            for split in self._split_text_by_words(text, chunk_size, chunk_overlap):
                 cleaned = " ".join(split.split())
                 if cleaned:
                     raw_chunks.append(
@@ -234,7 +226,7 @@ class DocumentChunker:
 
         Uses MarkdownHeaderTextSplitter first to respect document
         structure (headers create natural chunk boundaries), then
-        RecursiveCharacterTextSplitter for oversized sections.
+        rubric-aligned word-based splitting only for oversized sections.
 
         Interview talking point: header-aware splitting preserves
         semantic coherence better than naive character splitting —
@@ -253,11 +245,7 @@ class DocumentChunker:
         """
         markdown_text = file_path.read_text(encoding="utf-8")
         header_splitter = MarkdownHeaderTextSplitter(
-            headers_to_split_on=[("#", "h1"), ("##", "h2"), ("###", "h3")]
-        )
-        recursive_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
+            headers_to_split_on=[("##", "h2"), ("###", "h3")]
         )
 
         header_docs = header_splitter.split_text(markdown_text)
@@ -272,7 +260,12 @@ class DocumentChunker:
                 else doc.page_content.strip()
             )
 
-            for split in recursive_splitter.split_text(combined):
+            # Ignore document-title fragments that would otherwise become
+            # tiny, rubric-violating chunks.
+            if not prefix and len(combined.split()) < 20:
+                continue
+
+            for split in self._split_text_by_words(combined, chunk_size, chunk_overlap):
                 cleaned = " ".join(split.split())
                 if cleaned:
                     raw_chunks.append({"text": cleaned, "header": prefix})
@@ -354,3 +347,51 @@ class DocumentChunker:
         metadata_values.update(overrides)
 
         return ChunkMetadata(**metadata_values)
+
+    # -----------------------------------------------------------------------
+    # Text Splitting Helpers
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _split_text_by_words(
+        text: str,
+        chunk_size: int,
+        chunk_overlap: int,
+        minimum_words: int = 100,
+    ) -> list[str]:
+        """
+        Split text into mostly 100-300 word chunks.
+
+        If the source text is already within the rubric window, keep it intact.
+        Otherwise create overlapping word windows and merge tiny tail fragments
+        back into the preceding chunk when possible.
+        """
+        words = text.split()
+        if not words:
+            return []
+
+        if len(words) <= 300:
+            return [" ".join(words)]
+
+        step = max(1, chunk_size - chunk_overlap)
+        chunks: list[list[str]] = []
+        start = 0
+
+        while start < len(words):
+            end = min(start + chunk_size, len(words))
+            chunk_words = words[start:end]
+
+            if chunks and len(chunk_words) < minimum_words:
+                candidate = chunks[-1] + chunk_words
+                if len(candidate) <= 300:
+                    chunks[-1] = candidate
+                else:
+                    chunks.append(chunk_words)
+                break
+
+            chunks.append(chunk_words)
+            if end == len(words):
+                break
+            start += step
+
+        return [" ".join(chunk_words) for chunk_words in chunks]

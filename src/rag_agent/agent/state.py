@@ -217,6 +217,72 @@ class AgentResponse:
 
 
 # ---------------------------------------------------------------------------
+# Interview Workflow Models
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class InterviewQuestion:
+    """
+    A structured interview question generated from retrieved corpus content.
+
+    Attributes
+    ----------
+    question : str
+        The generated interview prompt.
+    difficulty : str
+        Difficulty level requested by the user or inferred from filters.
+    topic : str
+        Primary topic being assessed.
+    model_answer : str
+        Grounded model answer based on the retrieved context.
+    follow_up : str
+        One deeper follow-up question.
+    source_citations : list[str]
+        Sources used to create the question and answer.
+    """
+
+    question: str
+    difficulty: str
+    topic: str
+    model_answer: str
+    follow_up: str
+    source_citations: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AnswerEvaluation:
+    """
+    Structured evaluation of a student's answer against retrieved context.
+
+    Attributes
+    ----------
+    score : int
+        Integer score from 0 to 10.
+    what_was_correct : str
+        Specific strengths in the student's answer.
+    what_was_missing : str
+        Missing details or inaccuracies.
+    ideal_answer : str
+        Fully grounded model answer.
+    interview_verdict : str
+        Hiring signal based on this answer alone.
+    coaching_tip : str
+        Next study recommendation for the student.
+    source_citations : list[str]
+        Sources used during evaluation.
+    """
+
+    score: int
+    what_was_correct: str
+    what_was_missing: str
+    ideal_answer: str
+    interview_verdict: str
+    coaching_tip: str
+    source_citations: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # LangGraph State
 # ---------------------------------------------------------------------------
 

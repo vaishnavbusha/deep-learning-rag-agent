@@ -28,6 +28,11 @@ import streamlit as st
 from langchain_core.messages import HumanMessage
 
 from rag_agent.agent.graph import get_compiled_graph
+from rag_agent.agent.nodes import (
+    evaluate_candidate_answer,
+    generate_interview_question,
+)
+from rag_agent.agent.state import AgentResponse, AnswerEvaluation, InterviewQuestion
 from rag_agent.config import get_settings
 from rag_agent.corpus.chunker import DocumentChunker
 from rag_agent.vectorstore.store import VectorStoreManager
@@ -88,6 +93,8 @@ def initialise_session_state() -> None:
         "thread_id": "default-session",  # LangGraph conversation thread
         "topic_filter": None,
         "difficulty_filter": None,
+        "last_generated_question": None,
+        "last_answer_evaluation": None,
     }
     for key, default in defaults.items():
         if key not in st.session_state:
@@ -306,46 +313,133 @@ def render_chat_interface(graph) -> None:
             else 0,
         )
 
-    # Chat history display
-    chat_container = st.container(height=400)
-    with chat_container:
-        for message in st.session_state.chat_history:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-                if message.get("sources"):
-                    with st.expander("📎 Sources"):
-                        for source in message["sources"]:
-                            st.caption(source)
-                if message.get("no_context_found"):
-                    st.warning("⚠️ No relevant content found in corpus.")
-
-    query = st.chat_input(
-        "Ask about a deep learning topic...",
-        disabled=not st.session_state.ingested_documents,
+    ask_tab, generate_tab, evaluate_tab = st.tabs(
+        ["Ask the Corpus", "Generate Question", "Evaluate Answer"]
     )
 
-    if query:
-        st.session_state.chat_history.append({"role": "user", "content": query})
-        with st.spinner("Thinking..."):
-            result = graph.invoke(
-                {
-                    "messages": [HumanMessage(content=query)],
-                    "topic_filter": st.session_state.topic_filter,
-                    "difficulty_filter": st.session_state.difficulty_filter,
-                },
-                config={"configurable": {"thread_id": st.session_state.thread_id}},
-            )
-            response = result["final_response"]
+    with ask_tab:
+        chat_container = st.container(height=400)
+        with chat_container:
+            for message in st.session_state.chat_history:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+                    if message.get("sources"):
+                        with st.expander("📎 Sources"):
+                            for source in message["sources"]:
+                                st.caption(source)
+                    if message.get("no_context_found"):
+                        st.warning("⚠️ No relevant content found in corpus.")
 
-        st.session_state.chat_history.append(
-            {
-                "role": "assistant",
-                "content": response.answer,
-                "sources": response.sources,
-                "no_context_found": response.no_context_found,
-            }
+        query = st.chat_input(
+            "Ask about a deep learning topic...",
+            disabled=not st.session_state.ingested_documents,
         )
-        st.rerun()
+
+        if query:
+            st.session_state.chat_history.append({"role": "user", "content": query})
+            with st.spinner("Thinking..."):
+                result = graph.invoke(
+                    {
+                        "messages": [HumanMessage(content=query)],
+                        "topic_filter": st.session_state.topic_filter,
+                        "difficulty_filter": st.session_state.difficulty_filter,
+                    },
+                    config={"configurable": {"thread_id": st.session_state.thread_id}},
+                )
+                response = result["final_response"]
+
+            st.session_state.chat_history.append(
+                {
+                    "role": "assistant",
+                    "content": response.answer,
+                    "sources": response.sources,
+                    "no_context_found": response.no_context_found,
+                }
+            )
+            st.rerun()
+
+    with generate_tab:
+        topic_hint = st.text_input(
+            "Topic or concept",
+            placeholder="Example: LSTM gates or CNN pooling",
+            key="question_generation_topic",
+        )
+        generation_difficulty = st.selectbox(
+            "Question difficulty",
+            options=["beginner", "intermediate", "advanced"],
+            index=1,
+            key="question_generation_difficulty",
+        )
+        if st.button(
+            "Generate Interview Question",
+            use_container_width=True,
+            disabled=not st.session_state.ingested_documents or not topic_hint.strip(),
+        ):
+            with st.spinner("Generating grounded interview question..."):
+                st.session_state.last_generated_question = generate_interview_question(
+                    query_text=topic_hint,
+                    difficulty=generation_difficulty,
+                    topic_filter=st.session_state.topic_filter,
+                )
+
+        generated = st.session_state.last_generated_question
+        if isinstance(generated, AgentResponse):
+            st.warning(generated.answer)
+        elif isinstance(generated, InterviewQuestion):
+            st.markdown(f"**Question**  \n{generated.question}")
+            st.caption(
+                f"Topic: {generated.topic} | Difficulty: {generated.difficulty}"
+            )
+            st.markdown(f"**Model Answer**  \n{generated.model_answer}")
+            st.markdown(f"**Follow-up**  \n{generated.follow_up}")
+            with st.expander("📎 Sources"):
+                for source in generated.source_citations:
+                    st.caption(source)
+
+    with evaluate_tab:
+        evaluation_question = st.text_area(
+            "Interview question",
+            placeholder="Paste the interview question here",
+            key="evaluation_question",
+        )
+        candidate_answer = st.text_area(
+            "Candidate answer",
+            placeholder="Paste the student's answer here",
+            key="candidate_answer",
+            height=180,
+        )
+        if st.button(
+            "Evaluate Answer",
+            use_container_width=True,
+            disabled=(
+                not st.session_state.ingested_documents
+                or not evaluation_question.strip()
+                or not candidate_answer.strip()
+            ),
+        ):
+            with st.spinner("Evaluating answer against the corpus..."):
+                st.session_state.last_answer_evaluation = evaluate_candidate_answer(
+                    question=evaluation_question,
+                    candidate_answer=candidate_answer,
+                    topic_filter=st.session_state.topic_filter,
+                    difficulty_filter=st.session_state.difficulty_filter,
+                )
+
+        evaluation = st.session_state.last_answer_evaluation
+        if isinstance(evaluation, AgentResponse):
+            st.warning(evaluation.answer)
+        elif isinstance(evaluation, AnswerEvaluation):
+            st.metric("Score", f"{evaluation.score}/10")
+            st.markdown(f"**What Was Correct**  \n{evaluation.what_was_correct}")
+            st.markdown(f"**What Was Missing**  \n{evaluation.what_was_missing}")
+            st.markdown(f"**Ideal Answer**  \n{evaluation.ideal_answer}")
+            st.markdown(
+                f"**Interview Verdict**  \n{evaluation.interview_verdict}"
+            )
+            st.markdown(f"**Coaching Tip**  \n{evaluation.coaching_tip}")
+            with st.expander("📎 Sources"):
+                for source in evaluation.source_citations:
+                    st.caption(source)
 
 
 # ---------------------------------------------------------------------------

@@ -12,16 +12,25 @@ PEP 8 | OOP | Single Responsibility
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, trim_messages
 from loguru import logger
 
 from rag_agent.agent.prompts import (
+    ANSWER_EVALUATION_PROMPT,
+    NO_CONTEXT_RESPONSE,
+    QUESTION_GENERATION_PROMPT,
     QUERY_REWRITE_PROMPT,
     SYSTEM_PROMPT,
 )
-from rag_agent.agent.state import AgentResponse, AgentState
+from rag_agent.agent.state import (
+    AgentResponse,
+    AgentState,
+    AnswerEvaluation,
+    InterviewQuestion,
+)
 from rag_agent.config import LLMFactory, get_settings
 from rag_agent.vectorstore.store import VectorStoreManager
 
@@ -37,6 +46,135 @@ def _state_get(state: AgentState | dict, key: str, default=None):
     if isinstance(state, dict):
         return state.get(key, default)
     return getattr(state, key, default)
+
+
+def _clean_json_payload(payload: str) -> str:
+    """Normalize common LLM JSON wrappers before parsing."""
+    cleaned = payload.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+    return cleaned.strip()
+
+
+def _context_from_chunks(retrieved_chunks) -> tuple[str, list[str]]:
+    """Build prompt context and citations from retrieved chunks."""
+    context_blocks = []
+    citations = []
+    for chunk in retrieved_chunks:
+        citation = f"[SOURCE: {chunk.metadata.topic} | {chunk.metadata.source}]"
+        citations.append(citation)
+        context_blocks.append(f"{citation}\n{chunk.chunk_text}")
+    return "\n\n".join(context_blocks), sorted(set(citations))
+
+
+def _retrieve_context(
+    query_text: str,
+    topic_filter: str | None = None,
+    difficulty_filter: str | None = None,
+):
+    """Return retrieved chunks for helper workflows outside the graph."""
+    manager = get_vector_store_manager()
+    return manager.query(
+        query_text=query_text,
+        topic_filter=topic_filter,
+        difficulty_filter=difficulty_filter,
+    )
+
+
+def _parse_llm_json(prompt: str) -> dict:
+    """Invoke the LLM and parse a JSON-only response."""
+    llm = LLMFactory(get_settings()).create()
+    raw_response = llm.invoke(prompt).content
+    return json.loads(_clean_json_payload(raw_response))
+
+
+def generate_interview_question(
+    query_text: str,
+    difficulty: str = "intermediate",
+    topic_filter: str | None = None,
+) -> InterviewQuestion | AgentResponse:
+    """
+    Generate one interview question grounded in retrieved corpus context.
+
+    Returns an InterviewQuestion when context is found, otherwise the same
+    no-context AgentResponse pattern used by the chat workflow.
+    """
+    retrieved_chunks = _retrieve_context(
+        query_text=query_text,
+        topic_filter=topic_filter,
+        difficulty_filter=difficulty,
+    )
+    if not retrieved_chunks:
+        return AgentResponse(
+            answer=NO_CONTEXT_RESPONSE,
+            sources=[],
+            confidence=0.0,
+            no_context_found=True,
+            rewritten_query=query_text,
+        )
+
+    context, citations = _context_from_chunks(retrieved_chunks)
+    payload = _parse_llm_json(
+        QUESTION_GENERATION_PROMPT.format(
+            context=context,
+            difficulty=difficulty,
+        )
+    )
+    return InterviewQuestion(
+        question=payload["question"],
+        difficulty=payload.get("difficulty", difficulty),
+        topic=payload.get("topic", retrieved_chunks[0].metadata.topic),
+        model_answer=payload["model_answer"],
+        follow_up=payload["follow_up"],
+        source_citations=payload.get("source_citations", citations) or citations,
+    )
+
+
+def evaluate_candidate_answer(
+    question: str,
+    candidate_answer: str,
+    topic_filter: str | None = None,
+    difficulty_filter: str | None = None,
+) -> AnswerEvaluation | AgentResponse:
+    """
+    Evaluate a student's answer against retrieved corpus context.
+
+    Retrieval is based on the question text so the evaluation stays grounded
+    in the same topic area as the prompt being assessed.
+    """
+    retrieved_chunks = _retrieve_context(
+        query_text=question,
+        topic_filter=topic_filter,
+        difficulty_filter=difficulty_filter,
+    )
+    if not retrieved_chunks:
+        return AgentResponse(
+            answer=NO_CONTEXT_RESPONSE,
+            sources=[],
+            confidence=0.0,
+            no_context_found=True,
+            rewritten_query=question,
+        )
+
+    context, citations = _context_from_chunks(retrieved_chunks)
+    payload = _parse_llm_json(
+        ANSWER_EVALUATION_PROMPT.format(
+            question=question,
+            candidate_answer=candidate_answer,
+            context=context,
+        )
+    )
+    return AnswerEvaluation(
+        score=int(payload["score"]),
+        what_was_correct=payload["what_was_correct"],
+        what_was_missing=payload["what_was_missing"],
+        ideal_answer=payload["ideal_answer"],
+        interview_verdict=payload["interview_verdict"],
+        coaching_tip=payload["coaching_tip"],
+        source_citations=citations,
+    )
 
 
 DOMAIN_KEYWORDS = {
@@ -205,12 +343,7 @@ def generation_node(state: AgentState) -> dict:
 
     # ---- Hallucination Guard -----------------------------------------------
     if _state_get(state, "no_context_found", False):
-        no_context_message = (
-            "I was unable to find relevant information in the corpus for your query. "
-            "This may mean the topic is not yet covered in the study material, or "
-            "your query may need to be rephrased. Please try a more specific "
-            "deep learning topic such as 'LSTM forget gate' or 'CNN pooling layers'."
-        )
+        no_context_message = NO_CONTEXT_RESPONSE
         response = AgentResponse(
             answer=no_context_message,
             sources=[],
@@ -224,18 +357,9 @@ def generation_node(state: AgentState) -> dict:
         }
 
     # ---- Build Context from Retrieved Chunks --------------------------------
-    context_blocks = []
-    citations = []
     retrieved_chunks = _state_get(state, "retrieved_chunks", [])
-    for chunk in retrieved_chunks:
-        citation = f"[SOURCE: {chunk.metadata.topic} | {chunk.metadata.source}]"
-        citations.append(citation)
-        context_blocks.append(f"{citation}\n{chunk.chunk_text}")
-
-    context_message = (
-        "Use only the following retrieved context when answering.\n\n"
-        + "\n\n".join(context_blocks)
-    )
+    context_body, citations = _context_from_chunks(retrieved_chunks)
+    context_message = "Use only the following retrieved context when answering.\n\n" + context_body
     average_confidence = sum(
         chunk.score for chunk in retrieved_chunks
     ) / len(retrieved_chunks)
