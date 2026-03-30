@@ -132,6 +132,25 @@ def render_ingestion_panel(
     if not st.session_state.ingested_documents:
         st.session_state.ingested_documents = store.list_documents()
 
+    bundled_corpus_files = sorted(Path(get_settings().corpus_dir).glob("*.md"))
+
+    if st.sidebar.button(
+        "Load Bundled Corpus",
+        use_container_width=True,
+        disabled=not bundled_corpus_files,
+    ):
+        with st.sidebar:
+            with st.spinner("Loading bundled markdown corpus..."):
+                chunks = chunker.chunk_files(bundled_corpus_files)
+                result = store.ingest(chunks)
+
+            st.session_state.last_ingestion_result = result
+            st.session_state.ingested_documents = store.list_documents()
+            if st.session_state.ingested_documents:
+                st.session_state.selected_document = st.session_state.ingested_documents[
+                    0
+                ]["source"]
+
     if st.sidebar.button(
         "Ingest Documents",
         use_container_width=True,
@@ -168,6 +187,11 @@ def render_ingestion_panel(
             )
         else:
             st.sidebar.warning("No new chunks were added.")
+
+    if bundled_corpus_files:
+        st.sidebar.caption(
+            f"Bundled markdown corpus available: {len(bundled_corpus_files)} files"
+        )
 
     if st.session_state.last_ingestion_result and st.session_state.last_ingestion_result.errors:
         with st.sidebar.expander("Ingestion Errors"):
