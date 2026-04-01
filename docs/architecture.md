@@ -97,8 +97,8 @@ using thread_id from Streamlit session_state.
   - [x] LSTM
   - [x] Seq2Seq
   - [x] Autoencoder
-  - [ ] SOM *(bonus)*
-  - [ ] Boltzmann Machine *(bonus)*
+  - [x] SOM *(bonus)*
+  - [x] Boltzmann Machine *(bonus)*
   - [x] GAN *(bonus)*
 
 ---
